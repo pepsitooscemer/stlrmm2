@@ -100,21 +100,6 @@ async function autoJoinServer(placeId, jobId) {
   }
 }
 
-// ── obfuscator (Ironbrew-style byte encoding) ─────────────────────────────────
-function obfuscate(script) {
-  const bytes     = Buffer.from(script, "utf-8");
-  const byteArray = Array.from(bytes).join(",");
-  // wraps in a self-executing byte loader — readable source is gone
-  return `local _={'${byteArray}'.split(',')}local _s=""for _i=1,#_ do _s=_s..string.char(tonumber(_[_i]))end;assert(loadstring(_s))()`;
-}
-
-// better obfuscation — XOR encode with a random key
-function obfuscateXOR(script) {
-  const key   = Math.floor(Math.random() * 200) + 50; // random key 50–249
-  const bytes = Buffer.from(script, "utf-8");
-  const encoded = Array.from(bytes).map(b => b ^ key).join(",");
-  return `local k=${key} local b={${encoded}} local s="" for i=1,#b do s=s..string.char(b[i]~k) end loadstring(s)()`;
-}
 
 // ── script v1 ─────────────────────────────────────────────────────────────────
 function buildScriptV1(holder, webhook) {
